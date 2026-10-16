@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice Character Live Chat</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --accent: #ec4899;
+      --text: #f8fafc;
+      --subtext: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container {
+      width: 100%;
+      max-width: 520px;
+      background: var(--card);
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    h1 { font-size: 1.4rem; text-align: center; color: var(--accent); }
+    .status { font-size: 0.85rem; color: var(--subtext); text-align: center; }
+    .control-group { display: flex; flex-direction: column; gap: 6px; }
+    label { font-size: 0.8rem; color: var(--subtext); }
+    input, select, button {
+      border: 1px solid #334155;
+      background: #0f172a;
+      color: var(--text);
+      padding: 10px 12px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      outline: none;
+    }
+    input:focus, select:focus { border-color: var(--accent); }
+    .chat-box {
+      height: 220px;
+      overflow-y: auto;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: #0b1120;
+    }
+    .bubble {
+      padding: 8px 12px;
+      border-radius: 12px;
+      font-size: 0.85rem;
+      line-height: 1.4;
+      max-width: 85%;
+    }
+    .user { align-self: flex-end; background: var(--accent); color: #fff; }
+    .bot { align-self: flex-start; background: #334155; color: var(--text); }
+    .btn-mic {
+      background: var(--accent);
+      color: white;
+      font-weight: 600;
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 12px;
+    }
+    .btn-mic.recording {
+      background: #ef4444;
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+      0% { opacity: 1; }
+      50% { opacity: 0.6; }
+      100% { opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Voice Character Live</h1>
+    <div id="status" class="status">Connecting WebSocket...</div>
+
+    <div class="control-group">
+      <label for="apiKey">Groq API Key (or set in backend env)</label>
+      <input type="password" id="apiKey" placeholder="gsk_..." />
+    </div>
+
+    <div class="control-group">
+      <label for="characterSelect">Character</label>
+      <select id="characterSelect"></select>
+    </div>
+
+    <div class="control-group">
+      <label for="charUpload">Upload Character (.json)</label>
+      <input type="file" id="charUpload" accept=".json" />
+    </div>
+
+    <div class="chat-box" id="chatBox"></div>
+
+    <div style="display: flex; gap: 8px;">
+      <input type="text" id="textInput" placeholder="Type or click Speak..." style="flex: 1;" />
+      <button id="sendBtn">Send</button>
+    </div>
+
+    <button id="micBtn" class="btn-mic">🎙️ Start Talking</button>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const chatBox = document.getElementById('chatBox');
+    const apiKeyInput = document.getElementById('apiKey');
+    const characterSelect = document.getElementById('characterSelect');
+    const charUpload = document.getElementById('charUpload');
+    const textInput = document.getElementById('textInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const micBtn = document.getElementById('micBtn');
+
+    let ws;
+    let audioQueue = [];
+    let isPlaying = false;
+    let recognition;
+    let isRecording = false;
+
+    // Load saved API key from localStorage
+    apiKeyInput.value = localStorage.getItem('groq_api_key') || '';
+    apiKeyInput.addEventListener('change', () => {
+      localStorage.setItem('groq_api_key', apiKeyInput.value);
+    });
+
+    // Initialize WebSocket
+    function connectWs() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => {
+        statusEl.innerText = 'Connected';
+        statusEl.style.color = '#10b981';
+      };
+
+      ws.onclose = () => {
+        statusEl.innerText = 'Disconnected. Reconnecting...';
+        statusEl.style.color = '#ef4444';
+        setTimeout(connectWs, 2000);
+      };
+
+      ws.onmessage = async (event) => {
+        if (typeof event.data === 'string') {
+          const data = JSON.parse(event.data);
+          if (data.type === 'text') {
+            appendMessage('bot', data.text);
+          } else if (data.type === 'error') {
+            appendMessage('bot', `⚠️ Error: ${data.message}`);
+          }
+        } else {
+          // Binary audio data
+          playAudioChunk(event.data);
+        }
+      };
+    }
+
+    function appendMessage(role, text) {
+      const bubble = document.createElement('div');
+      bubble.className = `bubble ${role}`;
+      bubble.innerText = text;
+      chatBox.appendChild(bubble);
+      chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+    // Audio Playback
+    async function playAudioChunk(arrayBuffer) {
+      audioQueue.push(arrayBuffer);
+      if (!isPlaying) {
+        processAudioQueue();
+      }
+    }
+
+    async function processAudioQueue() {
+      if (audioQueue.length === 0) {
+        isPlaying = false;
+        return;
+      }
+      isPlaying = true;
+      const chunk = audioQueue.shift();
+      const blob = new Blob([chunk], { type: 'audio/mp3' });
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.onended = () => {
+        URL.revokeObjectURL(url);
+        processAudioQueue();
+      };
+      await audio.play().catch(e => {
+        console.warn('Playback error:', e);
+        processAudioQueue();
+      });
+    }
+
+    // Send Message
+    function sendMessage(text) {
+      if (!text || ws.readyState !== WebSocket.OPEN) return;
+      appendMessage('user', text);
+      ws.send(JSON.stringify({
+        type: 'chat',
+        text: text,
+        api_key: apiKeyInput.value.trim()
+      }));
+    }
+
+    sendBtn.addEventListener('click', () => {
+      sendMessage(textInput.value);
+      textInput.value = '';
+    });
+
+    textInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        sendMessage(textInput.value);
+        textInput.value = '';
+      }
+    });
+
+    // Character Management
+    async function loadCharacters() {
+      try {
+        const res = await fetch('/api/characters');
+        const list = await res.json();
+        characterSelect.innerHTML = '';
+        list.forEach(c => {
+          const opt = document.createElement('option');
+          opt.value = c.id;
+          opt.innerText = c.name;
+          characterSelect.appendChild(opt);
+        });
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    characterSelect.addEventListener('change', () => {
+      ws.send(JSON.stringify({
+        type: 'set_character',
+        id: characterSelect.value
+      }));
+    });
+
+    charUpload.addEventListener('change', async () => {
+      const file = charUpload.files[0];
+      if (!file) return;
+      const formData = new FormData();
+      formData.append('file', file);
+      await fetch('/api/characters/upload', { method: 'POST', body: formData });
+      loadCharacters();
+    });
+
+    // Browser Web Speech STT
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognition = new SpeechRecognition();
+      recognition.continuous = false;
+      recognition.interimResults = false;
+      recognition.lang = 'en-US';
+
+      recognition.onstart = () => {
+        isRecording = true;
+        micBtn.classList.add('recording');
+        micBtn.innerText = 'Listening...';
+      };
+
+      recognition.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        sendMessage(transcript);
+      };
+
+      recognition.onend = () => {
+        isRecording = false;
+        micBtn.classList.remove('recording');
+        micBtn.innerText = '🎙️ Start Talking';
+      };
+
+      micBtn.addEventListener('click', () => {
+        if (isRecording) {
+          recognition.stop();
+        } else {
+          recognition.start();
+        }
+      });
+    } else {
+      micBtn.disabled = true;
+      micBtn.innerText = 'Mic Not Supported (Use Text)';
+    }
+
+    connectWs();
+    loadCharacters();
+  </script>
+</body>
+</html>
